@@ -48,6 +48,20 @@ def calcola_turno():
     
     return turni[indice_turno]
 
+# Funzione per controllare se è ora di inviare il PDF
+def is_orario_invio():
+    ora_attuale = datetime.now().time()
+    orari_invio = [
+        time(8, 0),  # 08:00
+        time(20, 0)  # 20:00
+    ]
+    
+    for orario in orari_invio:
+        if (ora_attuale.hour == orario.hour and 
+            ora_attuale.minute == orario.minute):
+            return True
+    return False
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [['/start', '/lista', '/genera_PDF'],
                 ['/aiuto']]
@@ -55,7 +69,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "Benvenuto nel Bot di gestione segnalazioni!\n\n"
         "Usa i comandi qui sotto per interagire con il bot.\n"
-        "Ogni messaggio che invii verrà registrato come segnalazione.",
+        "Ogni messaggio che invii verrà registrato come segnalazione.\n\n"
+        "I report PDF vengono inviati automaticamente alle 8:00 e alle 20:00.",
         reply_markup=reply_markup
     )
 
@@ -71,12 +86,14 @@ async def aiuto(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "- Ogni messaggio che invii viene salvato come segnalazione\n"
         "- Il turno viene assegnato automaticamente\n"
         "- Puoi visualizzare le segnalazioni con /lista\n"
-        "- Puoi generare un report PDF con /genera_PDF"
+        "- I report PDF vengono inviati automaticamente alle 8:00 e alle 20:00\n"
+        "- Puoi anche generare un report PDF manualmente con /genera_PDF"
     )
     await update.message.reply_text(guida, parse_mode='Markdown')
 
 async def gestisci_messaggio(update: Update, context: ContextTypes.DEFAULT_TYPE):
     testo_segnalazione = update.message.text
+    chat_id = update.effective_chat.id
     
     try:
         turno = calcola_turno()
@@ -94,6 +111,21 @@ async def gestisci_messaggio(update: Update, context: ContextTypes.DEFAULT_TYPE)
             f"📝 Turno: {turno}\n"
             f"🕒 Data: {data}"
         )
+
+        # Controlla se è ora di inviare il PDF
+        if is_orario_invio():
+            try:
+                file_pdf = genera_pdf()
+                await context.bot.send_document(
+                    chat_id=chat_id,
+                    document=open(file_pdf, 'rb'),
+                    filename=f"segnalazioni_{datetime.now().strftime('%Y%m%d')}.pdf",
+                    caption="📊 Report automatico giornaliero delle segnalazioni"
+                )
+                os.remove(file_pdf)
+            except Exception as e:
+                print(f"Errore nell'invio automatico del PDF: {e}")
+                
     except Exception as e:
         await update.message.reply_text(f"❌ Errore: {str(e)}")
 
