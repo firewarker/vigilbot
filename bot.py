@@ -5,9 +5,18 @@ from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, fil
 from fpdf import FPDF
 from datetime import datetime, time
 from dotenv import load_dotenv
+from flask import Flask
+import threading
 
 # Carica le variabili di ambiente
 load_dotenv()
+
+# Inizializza Flask per Render
+app = Flask(__name__)
+
+@app.route('/')
+def home():
+    return "Bot is running!"
 
 # Connessione al database SQLite
 def get_db_connection():
@@ -166,9 +175,17 @@ async def genera_PDF(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         await update.message.reply_text(f"❌ Errore nella generazione del PDF: {str(e)}")
 
+def run_flask():
+    port = int(os.environ.get('PORT', 10000))
+    app.run(host='0.0.0.0', port=port)
+
 def main():
     # Inizializza il database
     init_db()
+    
+    # Avvia Flask in un thread separato
+    flask_thread = threading.Thread(target=run_flask)
+    flask_thread.start()
     
     # Configura il bot
     token = os.getenv("TELEGRAM_TOKEN")
