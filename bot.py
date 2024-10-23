@@ -142,7 +142,6 @@ async def scheduler(application):
         except Exception as e:
             logger.error(f"Errore nello scheduler: {e}")
             await asyncio.sleep(60)
-
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     username = update.effective_user.username
@@ -318,4 +317,26 @@ async def main_async():
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, gestisci_messaggio))
     
     # Avvia lo scheduler in background
-    asyncio.create_task(scheduler(
+    asyncio.create_task(scheduler(application))
+    
+    # Avvia il bot
+    logger.info(f"Bot avviato con successo! Ora corrente: {datetime.now(get_tz_italia()).strftime('%H:%M:%S')}")
+    
+    PORT = int(os.environ.get('PORT', '10000'))
+    
+    if os.environ.get('RENDER'):
+        logger.info(f"Avvio in modalità webhook su porta {PORT}")
+        await application.run_webhook(
+            listen="0.0.0.0",
+            port=PORT,
+            webhook_url=os.environ.get('WEBHOOK_URL')
+        )
+    else:
+        logger.info("Avvio in modalità polling")
+        await application.run_polling()
+
+def main():
+    asyncio.run(main_async())
+
+if __name__ == '__main__':
+    main()
