@@ -55,7 +55,8 @@ def init_db():
 
 # Funzione per calcolare il turno corrente
 def calcola_turno():
-    data_riferimento = datetime(2024, 10, 18)
+    # Aggiungi il fuso orario alla data di riferimento
+    data_riferimento = datetime(2024, 10, 18, tzinfo=get_tz_italia())
     oggi = datetime.now(get_tz_italia())
     turni = ['A', 'B', 'C', 'D']
     giorni_passati = (oggi - data_riferimento).days
