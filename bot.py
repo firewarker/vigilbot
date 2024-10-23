@@ -3,11 +3,33 @@ import sqlite3
 from telegram import Update, ReplyKeyboardMarkup
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes
 from fpdf import FPDF
-from datetime import datetime, time
+from datetime import datetime, time, timezone, timedelta
 from dotenv import load_dotenv
 
 # Carica le variabili di ambiente
 load_dotenv()
+
+def get_tz_italia():
+    """
+    Restituisce il fuso orario italiano corretto basandosi sulla data
+    per gestire automaticamente ora legale/solare
+    """
+    now = datetime.now()
+    
+    def is_dst(dt):
+        # Ultima domenica di marzo
+        dst_start = datetime(dt.year, 3, 31)
+        while dst_start.weekday() != 6:  # 6 = domenica
+            dst_start -= timedelta(days=1)
+        
+        # Ultima domenica di ottobre
+        dst_end = datetime(dt.year, 10, 31)
+        while dst_end.weekday() != 6:  # 6 = domenica
+            dst_end -= timedelta(days=1)
+        
+        return dst_start <= dt.replace(tzinfo=None) <= dst_end
+    
+    return timezone(timedelta(hours=2 if is_dst(now) else 1))
 
 # Connessione al database SQLite
 def get_db_connection():
@@ -34,7 +56,7 @@ def init_db():
 # Funzione per calcolare il turno corrente
 def calcola_turno():
     data_riferimento = datetime(2024, 10, 18)
-    oggi = datetime.now()
+    oggi = datetime.now(get_tz_italia())
     turni = ['A', 'B', 'C', 'D']
     giorni_passati = (oggi - data_riferimento).days
     ora_attuale = oggi.time()
@@ -48,29 +70,14 @@ def calcola_turno():
     
     return turni[indice_turno]
 
-# Funzione per controllare se è ora di inviare il PDF
-def is_orario_invio():
-    ora_attuale = datetime.now().time()
-    orari_invio = [
-        time(8, 0),  # 08:00
-        time(20, 0)  # 20:00
-    ]
-    
-    for orario in orari_invio:
-        if (ora_attuale.hour == orario.hour and 
-            ora_attuale.minute == orario.minute):
-            return True
-    return False
-
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [['/start', '/lista', '/genera_PDF'],
-                ['/aiuto']]
+                ['/ora', '/aiuto']]
     reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
     await update.message.reply_text(
         "Benvenuto nel Bot di gestione segnalazioni!\n\n"
         "Usa i comandi qui sotto per interagire con il bot.\n"
-        "Ogni messaggio che invii verrà registrato come segnalazione.\n\n"
-        "I report PDF vengono inviati automaticamente alle 8:00 e alle 20:00.",
+        "Ogni messaggio che invii verrà registrato come segnalazione.",
         reply_markup=reply_markup
     )
 
@@ -81,23 +88,22 @@ async def aiuto(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• /start - Avvia il bot e mostra il menu principale\n"
         "• /lista - Visualizza le ultime 20 segnalazioni\n"
         "• /genera_PDF - Crea un PDF con tutte le segnalazioni\n"
+        "• /ora - Mostra l'ora attuale del bot e il turno\n"
         "• /aiuto - Mostra questo messaggio di aiuto\n\n"
         "*Come funziona:*\n"
         "- Ogni messaggio che invii viene salvato come segnalazione\n"
         "- Il turno viene assegnato automaticamente\n"
         "- Puoi visualizzare le segnalazioni con /lista\n"
-        "- I report PDF vengono inviati automaticamente alle 8:00 e alle 20:00\n"
-        "- Puoi anche generare un report PDF manualmente con /genera_PDF"
+        "- Puoi generare un report PDF completo con /genera_PDF"
     )
     await update.message.reply_text(guida, parse_mode='Markdown')
 
 async def gestisci_messaggio(update: Update, context: ContextTypes.DEFAULT_TYPE):
     testo_segnalazione = update.message.text
-    chat_id = update.effective_chat.id
     
     try:
         turno = calcola_turno()
-        data = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        data = datetime.now(get_tz_italia()).strftime("%Y-%m-%d %H:%M:%S")
         
         conn = get_db_connection()
         c = conn.cursor()
@@ -111,21 +117,6 @@ async def gestisci_messaggio(update: Update, context: ContextTypes.DEFAULT_TYPE)
             f"📝 Turno: {turno}\n"
             f"🕒 Data: {data}"
         )
-
-        # Controlla se è ora di inviare il PDF
-        if is_orario_invio():
-            try:
-                file_pdf = genera_pdf()
-                await context.bot.send_document(
-                    chat_id=chat_id,
-                    document=open(file_pdf, 'rb'),
-                    filename=f"segnalazioni_{datetime.now().strftime('%Y%m%d')}.pdf",
-                    caption="📊 Report automatico giornaliero delle segnalazioni"
-                )
-                os.remove(file_pdf)
-            except Exception as e:
-                print(f"Errore nell'invio automatico del PDF: {e}")
-                
     except Exception as e:
         await update.message.reply_text(f"❌ Errore: {str(e)}")
 
@@ -153,17 +144,24 @@ def genera_pdf():
     pdf.set_font("Arial", "B", 16)
     pdf.cell(0, 10, "Registro Segnalazioni", ln=True, align='C')
     pdf.set_font("Arial", size=12)
-    pdf.cell(0, 10, f"Generato il: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}", ln=True, align='L')
+    ora_generazione = datetime.now(get_tz_italia()).strftime("%d/%m/%Y %H:%M:%S")
+    pdf.cell(0, 10, f"Generato il: {ora_generazione}", ln=True, align='L')
     pdf.ln(10)
     
     conn = get_db_connection()
     c = conn.cursor()
+    
+    # Prima ottieni il numero totale di segnalazioni
+    c.execute("SELECT COUNT(*) as total FROM segnalazioni")
+    total = c.fetchone()['total']
+    
+    # Poi ottieni tutte le segnalazioni ordinate per data
     c.execute("SELECT * FROM segnalazioni ORDER BY data DESC")
     segnalazioni = c.fetchall()
     conn.close()
     
     pdf.set_font("Arial", "B", 12)
-    pdf.cell(0, 10, "Elenco Segnalazioni:", ln=True)
+    pdf.cell(0, 10, f"Elenco Completo Segnalazioni (Totale: {total})", ln=True)
     pdf.ln(5)
     
     for segnalazione in segnalazioni:
@@ -173,7 +171,7 @@ def genera_pdf():
         pdf.multi_cell(0, 7, segnalazione['segnalazione'])
         pdf.ln(5)
     
-    file_path = f"segnalazioni_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf"
+    file_path = f"segnalazioni_{datetime.now(get_tz_italia()).strftime('%Y%m%d_%H%M%S')}.pdf"
     pdf.output(file_path)
     return file_path
 
@@ -183,12 +181,25 @@ async def genera_PDF(update: Update, context: ContextTypes.DEFAULT_TYPE):
         file_pdf = genera_pdf()
         await update.message.reply_document(
             document=open(file_pdf, 'rb'),
-            filename="segnalazioni.pdf",
-            caption="📊 Ecco il report delle segnalazioni in formato PDF"
+            filename=f"segnalazioni_complete_{datetime.now(get_tz_italia()).strftime('%Y%m%d_%H%M')}.pdf",
+            caption="📊 Report completo di tutte le segnalazioni"
         )
         os.remove(file_pdf)
     except Exception as e:
         await update.message.reply_text(f"❌ Errore nella generazione del PDF: {str(e)}")
+
+async def ora_bot(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    ora_attuale = datetime.now(get_tz_italia())
+    turno_attuale = calcola_turno()
+    
+    await update.message.reply_text(
+        f"🕒 *Informazioni Orario Bot*\n\n"
+        f"Data: {ora_attuale.strftime('%d/%m/%Y')}\n"
+        f"Ora: {ora_attuale.strftime('%H:%M:%S')}\n"
+        f"Fuso Orario: {'Ora Legale (UTC+2)' if ora_attuale.tzinfo.utcoffset(None) == timedelta(hours=2) else 'Ora Solare (UTC+1)'}\n"
+        f"Turno Attuale: {turno_attuale}",
+        parse_mode='Markdown'
+    )
 
 def main():
     print("Inizializzazione del bot...")
@@ -214,10 +225,12 @@ def main():
     application.add_handler(CommandHandler("lista", lista))
     application.add_handler(CommandHandler("genera_PDF", genera_PDF))
     application.add_handler(CommandHandler("aiuto", aiuto))
+    application.add_handler(CommandHandler("ora", ora_bot))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, gestisci_messaggio))
     
     # Avvia il bot
     print("🚀 Bot avviato con successo!")
+    print(f"Ora corrente del bot: {datetime.now(get_tz_italia()).strftime('%H:%M:%S')}")
     
     # Gestione webhook per Render
     PORT = int(os.environ.get('PORT', '10000'))
