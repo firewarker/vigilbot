@@ -1,5 +1,3 @@
-# [Tutto il codice precedente rimane uguale fino alla funzione main]
-
 async def main_async():
     logger.info("Inizializzazione del bot...")
     
