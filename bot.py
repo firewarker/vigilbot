@@ -1,10 +1,19 @@
 import os
 import sqlite3
+import asyncio
+import logging
 from telegram import Update, ReplyKeyboardMarkup
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes
 from fpdf import FPDF
 from datetime import datetime, time, timezone, timedelta
 from dotenv import load_dotenv
+
+# Configura il logging
+logging.basicConfig(
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    level=logging.INFO
+)
+logger = logging.getLogger(__name__)
 
 # Carica le variabili di ambiente
 load_dotenv()
@@ -42,20 +51,26 @@ def init_db():
     try:
         conn = get_db_connection()
         c = conn.cursor()
+        # Tabella segnalazioni
         c.execute('''CREATE TABLE IF NOT EXISTS segnalazioni
                     (id INTEGER PRIMARY KEY AUTOINCREMENT, 
                      turno TEXT, 
                      segnalazione TEXT,
-                     data TEXT)''')
+                     data TEXT,
+                     chat_id INTEGER)''')
+        # Tabella utenti
+        c.execute('''CREATE TABLE IF NOT EXISTS utenti
+                    (chat_id INTEGER PRIMARY KEY,
+                     username TEXT,
+                     data_registrazione TEXT)''')
         conn.commit()
+        logger.info("Database inizializzato con successo")
     except Exception as e:
-        print(f"Errore nell'inizializzazione del database: {e}")
+        logger.error(f"Errore nell'inizializzazione del database: {e}")
     finally:
         conn.close()
 
-# Funzione per calcolare il turno corrente
 def calcola_turno():
-    # Aggiungi il fuso orario alla data di riferimento
     data_riferimento = datetime(2024, 10, 18, tzinfo=get_tz_italia())
     oggi = datetime.now(get_tz_italia())
     turni = ['A', 'B', 'C', 'D']
@@ -71,16 +86,91 @@ def calcola_turno():
     
     return turni[indice_turno]
 
+async def check_and_send_pdf(application):
+    """
+    Controlla l'ora e invia il PDF se necessario
+    """
+    ora_attuale = datetime.now(get_tz_italia())
+    orari_invio = [time(8, 0), time(20, 0)]  # 08:00 e 20:00
+
+    for orario in orari_invio:
+        if ora_attuale.hour == orario.hour and ora_attuale.minute == 0:
+            logger.info(f"Iniziando invio PDF programmato per le {orario}")
+            try:
+                # Genera il PDF
+                file_pdf = genera_pdf()
+                logger.info("PDF generato con successo")
+
+                # Ottieni tutti gli utenti
+                conn = get_db_connection()
+                c = conn.cursor()
+                c.execute("SELECT DISTINCT chat_id FROM utenti")
+                utenti = c.fetchall()
+                conn.close()
+
+                for utente in utenti:
+                    try:
+                        chat_id = utente[0]
+                        await application.bot.send_document(
+                            chat_id=chat_id,
+                            document=open(file_pdf, 'rb'),
+                            filename=f"segnalazioni_{ora_attuale.strftime('%Y%m%d_%H%M')}.pdf",
+                            caption=f"📊 Report automatico delle segnalazioni\n"
+                                  f"Generato il: {ora_attuale.strftime('%d/%m/%Y ore %H:%M')}"
+                        )
+                        logger.info(f"PDF inviato con successo all'utente {chat_id}")
+                        await asyncio.sleep(1)  # Pausa tra gli invii
+                    except Exception as e:
+                        logger.error(f"Errore nell'invio del PDF all'utente {chat_id}: {e}")
+                
+                # Rimuovi il file PDF dopo l'invio
+                os.remove(file_pdf)
+                logger.info("PDF rimosso dopo l'invio completato")
+                
+            except Exception as e:
+                logger.error(f"Errore durante l'invio automatico del PDF: {e}")
+
+async def scheduler(application):
+    """
+    Scheduler per il controllo periodico
+    """
+    while True:
+        try:
+            await check_and_send_pdf(application)
+            # Attendi un minuto prima del prossimo controllo
+            await asyncio.sleep(60)
+        except Exception as e:
+            logger.error(f"Errore nello scheduler: {e}")
+            await asyncio.sleep(60)
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    keyboard = [['/start', '/lista', '/genera_PDF'],
-                ['/ora', '/aiuto']]
-    reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
-    await update.message.reply_text(
-        "Benvenuto nel Bot di gestione segnalazioni!\n\n"
-        "Usa i comandi qui sotto per interagire con il bot.\n"
-        "Ogni messaggio che invii verrà registrato come segnalazione.",
-        reply_markup=reply_markup
-    )
+    chat_id = update.effective_chat.id
+    username = update.effective_user.username
+    
+    try:
+        # Registra l'utente
+        conn = get_db_connection()
+        c = conn.cursor()
+        now = datetime.now(get_tz_italia()).strftime("%Y-%m-%d %H:%M:%S")
+        c.execute("""INSERT OR REPLACE INTO utenti (chat_id, username, data_registrazione) 
+                    VALUES (?, ?, ?)""", (chat_id, username, now))
+        conn.commit()
+        conn.close()
+        logger.info(f"Nuovo utente registrato: {username} ({chat_id})")
+        
+        keyboard = [['/start', '/lista', '/genera_PDF'],
+                    ['/ora', '/aiuto']]
+        reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+        await update.message.reply_text(
+            "Benvenuto nel Bot di gestione segnalazioni!\n\n"
+            "Usa i comandi qui sotto per interagire con il bot.\n"
+            "Ogni messaggio che invii verrà registrato come segnalazione.\n\n"
+            "Riceverai automaticamente un PDF alle 8:00 e alle 20:00.",
+            reply_markup=reply_markup
+        )
+    except Exception as e:
+        logger.error(f"Errore nella registrazione dell'utente: {e}")
+        await update.message.reply_text("Si è verificato un errore. Riprova più tardi.")
 
 async def aiuto(update: Update, context: ContextTypes.DEFAULT_TYPE):
     guida = (
@@ -94,13 +184,14 @@ async def aiuto(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "*Come funziona:*\n"
         "- Ogni messaggio che invii viene salvato come segnalazione\n"
         "- Il turno viene assegnato automaticamente\n"
-        "- Puoi visualizzare le segnalazioni con /lista\n"
-        "- Puoi generare un report PDF completo con /genera_PDF"
+        "- Ricevi automaticamente un PDF alle 8:00 e alle 20:00\n"
+        "- Puoi generare un report PDF manualmente con /genera_PDF"
     )
     await update.message.reply_text(guida, parse_mode='Markdown')
 
 async def gestisci_messaggio(update: Update, context: ContextTypes.DEFAULT_TYPE):
     testo_segnalazione = update.message.text
+    chat_id = update.effective_chat.id
     
     try:
         turno = calcola_turno()
@@ -108,8 +199,8 @@ async def gestisci_messaggio(update: Update, context: ContextTypes.DEFAULT_TYPE)
         
         conn = get_db_connection()
         c = conn.cursor()
-        c.execute("INSERT INTO segnalazioni (turno, segnalazione, data) VALUES (?, ?, ?)",
-                 (turno, testo_segnalazione, data))
+        c.execute("INSERT INTO segnalazioni (turno, segnalazione, data, chat_id) VALUES (?, ?, ?, ?)",
+                 (turno, testo_segnalazione, data, chat_id))
         conn.commit()
         conn.close()
         
@@ -198,27 +289,24 @@ async def ora_bot(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"Data: {ora_attuale.strftime('%d/%m/%Y')}\n"
         f"Ora: {ora_attuale.strftime('%H:%M:%S')}\n"
         f"Fuso Orario: {'Ora Legale (UTC+2)' if ora_attuale.tzinfo.utcoffset(None) == timedelta(hours=2) else 'Ora Solare (UTC+1)'}\n"
-        f"Turno Attuale: {turno_attuale}",
+        f"Turno Attuale: {turno_attuale}\n\n"
+        f"Prossimi invii PDF:\n"
+        f"• Mattina: 08:00\n"
+        f"• Sera: 20:00",
         parse_mode='Markdown'
     )
 
-def main():
-    print("Inizializzazione del bot...")
+async def main_async():
+    logger.info("Inizializzazione del bot...")
     
     # Inizializza il database
-    try:
-        print("Inizializzazione database...")
-        init_db()
-        print("Database inizializzato con successo!")
-    except Exception as e:
-        print(f"Errore nell'inizializzazione del database: {e}")
+    init_db()
     
     # Configura il bot
     token = os.getenv("TELEGRAM_TOKEN")
     if not token:
-        raise ValueError("❌ Token non trovato! Controlla il file .env")
+        raise ValueError("Token non trovato!")
     
-    # Crea l'applicazione
     application = ApplicationBuilder().token(token).build()
     
     # Aggiungi gli handler
@@ -229,23 +317,5 @@ def main():
     application.add_handler(CommandHandler("ora", ora_bot))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, gestisci_messaggio))
     
-    # Avvia il bot
-    print("🚀 Bot avviato con successo!")
-    print(f"Ora corrente del bot: {datetime.now(get_tz_italia()).strftime('%H:%M:%S')}")
-    
-    # Gestione webhook per Render
-    PORT = int(os.environ.get('PORT', '10000'))
-    
-    if os.environ.get('RENDER'):
-        print(f"Avvio in modalità webhook su porta {PORT}")
-        application.run_webhook(
-            listen="0.0.0.0",
-            port=PORT,
-            webhook_url=os.environ.get('WEBHOOK_URL')
-        )
-    else:
-        print("Avvio in modalità polling")
-        application.run_polling()
-
-if __name__ == '__main__':
-    main()
+    # Avvia lo scheduler in background
+    asyncio.create_task(scheduler(
