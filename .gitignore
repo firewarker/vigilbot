@@ -1,0 +1,5 @@
+.DS_Store
+backup_bot/
+segnalazioni_backup.db
+segnalazioni_current.db
+venv/
